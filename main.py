@@ -2,20 +2,22 @@ import requests
 import pyodbc
 from concurrent.futures import ThreadPoolExecutor
 import time
-import os
+import subprocess
+import sys
 
 GLOBAL_ACCESS_TOKEN = None
+ERROR_COUNT = 0  # Contador global para erros consecutivos
 
 # Função para obter tokens de acesso
 def get_tokens():
-    url = "https://api.userede.com.br/redelabs/oauth/token" 
+    url = "https://api.userede.com.br/redelabs/oauth/token"
     body = {
         "grant_type": "password",
-        "username": os.getenv("API_USERNAME"), 
-        "password": os.getenv("API_PASSWORD") 
+        "username": "your_username",
+        "password": "your_password"
     }
     headers = {
-        "Authorization": os.getenv("API_AUTHORIZATION_HEADER") 
+        "Authorization": "your_authorization_header=",
     }
     response = requests.post(url, data=body, headers=headers)
 
@@ -28,7 +30,9 @@ def get_tokens():
 
 # Função para buscar dados na API usando os parâmetros fornecidos
 def fetch_installments(access_token, sale_date, nsu, merchant_id):
-    url = f"https://api.example.com/payments/installments/{merchant_id}"
+    global ERROR_COUNT
+
+    url = f"https://api.userede.com.br/redelabs/merchant-statement/v2/payments/installments/{merchant_id}"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {access_token}"
@@ -57,14 +61,31 @@ def fetch_installments(access_token, sale_date, nsu, merchant_id):
     if response.status_code == 200:
         data = response.json()
         if 'content' in data and 'installments' in data['content']:
+            ERROR_COUNT = 0  # Reseta o contador ao obter sucesso
             return data['content']['installments'][0].get("installmentQuantity", None)
 
+    if response.status_code == 204:
+        print(f"Consulta retornou nenhum resultado (204) para NSU={nsu}. Definindo parcelas como 0.")
+        ERROR_COUNT = 0  # Reseta o contador para evitar reinicializações
+        return 0  # Retorna 0 para ser atualizado no banco
+
     print(f"Erro ao consultar API: {response.status_code}, Detalhes: {response.text}")
+    ERROR_COUNT += 1
+    if ERROR_COUNT > 20:
+        print("Mais de 20 erros consecutivos. Reiniciando o programa...")
+        restart_program()
     return None
 
-# Função para processar um único registro com retries
+# Função para reiniciar o programa
+def restart_program():
+    print("Reiniciando o programa...")
+    python = sys.executable
+    script_path = sys.argv[0]
+    subprocess.Popen([python, script_path])
+    sys.exit(0)  # Finaliza o processo atual
+
+# Função para processar registros
 def process_record(record, conn_str, retries=3):
-    global GLOBAL_ACCESS_TOKEN
     sale_date, nsu, merchant_id = record
 
     for attempt in range(retries):
@@ -81,16 +102,16 @@ def process_record(record, conn_str, retries=3):
                 conn.commit()
                 cursor.close()
                 conn.close()
-                print(f"Atualizado: NSU={nsu}, Parcelas={installment_quantity}")
+                print(f"Registro atualizado: NSU={nsu}, Parcelas={installment_quantity}")
                 return True
             else:
-                print(f"Erro ao obter parcelas para NSU={nsu}")
-                return False
+                print(f"Erro ao obter parcelas para NSU={nsu}. Tentando novamente... ({attempt + 1}/{retries})")
         except pyodbc.Error as e:
             if "40001" in str(e):
-                print(f"Deadlock detectado para NSU={nsu}. Tentando novamente... ({attempt + 1}/{retries})")
-                time.sleep(2 ** attempt) 
+                print(f"Deadlock detectado para NSU={nsu}. Retentando...")
+                time.sleep(2 ** attempt)  # Backoff exponencial
             else:
+                print(f"Erro inesperado no banco de dados: {e}")
                 raise
     print(f"Falha ao processar NSU={nsu} após {retries} tentativas.")
     return False
@@ -108,10 +129,10 @@ def update_installment_quantities():
     global GLOBAL_ACCESS_TOKEN
     conn_str = (
         "Driver={ODBC Driver 17 for SQL Server};"
-        f"Server={os.getenv('DB_SERVER')},{os.getenv('DB_PORT')};"
-        f"Database={os.getenv('DB_NAME')};"
-        f"UID={os.getenv('DB_USER')};"
-        f"PWD={os.getenv('DB_PASSWORD')};"
+        "Server=yourserver;"
+        "Database=yourdatabase;"
+        "UID=yourusername;"
+        "PWD=yourpassword;"
     )
     conn = pyodbc.connect(conn_str)
     cursor = conn.cursor()
